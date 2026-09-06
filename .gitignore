@@ -26,3 +26,39 @@ yarn-error.log*
 
 # vercel
 .vercel
+
+# --- D: drive consolidation defaults ---
+.env
+.env.*
+!.env.example
+*.key
+*.p12
+*.pfx
+*.keystore
+*.jks
+client_secret*.json
+service-account*.json
+token*.json
+credentials*.json
+*.sqlite
+*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+chroma_db/
+node_modules/
+.venv/
+venv/
+__pycache__/
+dist/
+build/
+target/
+.next/
+.cache/
+.turbo/
+coverage/
+logs/
+*.log
+uploads/
+runtime/
+Thumbs.db

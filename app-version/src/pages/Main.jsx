@@ -7,6 +7,9 @@ import {
 } from 'lucide-react'
 import { AreaChart, Area, XAxis, YAxis, ResponsiveContainer, Tooltip } from 'recharts'
 
+const WOUND_MODEL_API_URL = import.meta.env.VITE_WOUND_MODEL_API_URL || 'http://127.0.0.1:8008/api/predict'
+const MAX_WOUND_IMAGE_SIZE = 10 * 1024 * 1024
+
 // --- Mock Data & Constants ---
 const SHIP_INFO = {
   name: '해신-호 (HAESIN-07)',
@@ -68,6 +71,17 @@ export default function Main() {
   const [chat, setChat] = useState([{ role: 'ai', text: 'MDTS 엣지 AI가 활성화되었습니다. 환자의 상태를 실시간 분석 중입니다.' }])
   const [crewSearch, setCrewSearch] = useState('')
   const [crewRoleTab, setCrewRoleTab] = useState('전체')
+  const woundImageInputRef = useRef(null)
+  const woundCameraVideoRef = useRef(null)
+  const woundCameraCanvasRef = useRef(null)
+  const woundCameraStreamRef = useRef(null)
+  const [woundAnalysis, setWoundAnalysis] = useState(null)
+  const [woundAnalysisStatus, setWoundAnalysisStatus] = useState('idle')
+  const [woundAnalysisError, setWoundAnalysisError] = useState('')
+  const [woundImageName, setWoundImageName] = useState('')
+  const [showWoundCamera, setShowWoundCamera] = useState(false)
+  const [woundCameraReady, setWoundCameraReady] = useState(false)
+  const [woundCameraError, setWoundCameraError] = useState('')
   
   // Modal States
   const [showModal, setShowModal] = useState(null) // 'create', 'edit', 'delete'
@@ -100,6 +114,62 @@ export default function Main() {
   useEffect(() => {
     setMews(calculateMEWS(hr, rr, bp.split('/')[0], bt))
   }, [hr, rr, bp, bt])
+
+  const stopWoundCamera = () => {
+    if (woundCameraStreamRef.current) {
+      woundCameraStreamRef.current.getTracks().forEach(track => track.stop())
+      woundCameraStreamRef.current = null
+    }
+    setWoundCameraReady(false)
+  }
+
+  useEffect(() => {
+    if (!showWoundCamera) return undefined
+
+    let cancelled = false
+
+    const startCamera = async () => {
+      setWoundCameraError('')
+      setWoundCameraReady(false)
+
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setWoundCameraError('현재 브라우저에서 카메라 접근을 지원하지 않습니다.')
+        return
+      }
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1280 },
+            height: { ideal: 720 },
+          },
+          audio: false,
+        })
+
+        if (cancelled) {
+          stream.getTracks().forEach(track => track.stop())
+          return
+        }
+
+        woundCameraStreamRef.current = stream
+        if (woundCameraVideoRef.current) {
+          woundCameraVideoRef.current.srcObject = stream
+          await woundCameraVideoRef.current.play()
+        }
+        setWoundCameraReady(true)
+      } catch (error) {
+        setWoundCameraError(`카메라 접근 실패: ${error.message}`)
+      }
+    }
+
+    startCamera()
+
+    return () => {
+      cancelled = true
+      stopWoundCamera()
+    }
+  }, [showWoundCamera])
 
   const handleLogin = (e) => {
     e.preventDefault()
@@ -137,6 +207,120 @@ export default function Main() {
       setChat([...newChat, { role: 'ai', text: aiResponse }]);
     }, 1000);
   };
+
+  const analyzeWoundImageFile = async (file) => {
+    if (!file.type.startsWith('image/')) {
+      setWoundAnalysisError('이미지 파일만 업로드할 수 있습니다.')
+      return
+    }
+
+    if (file.size > MAX_WOUND_IMAGE_SIZE) {
+      setWoundAnalysisError('이미지 파일은 최대 10MB까지 업로드할 수 있습니다.')
+      return
+    }
+
+    setWoundImageName(file.name)
+    setWoundAnalysis(null)
+    setWoundAnalysisError('')
+    setWoundAnalysisStatus('loading')
+    setChat(prev => [...prev, { role: 'ai', text: `외상 이미지 분석을 시작합니다. 파일명: ${file.name}` }])
+
+    try {
+      const formData = new FormData()
+      formData.append('image', file)
+
+      const response = await fetch(WOUND_MODEL_API_URL, {
+        method: 'POST',
+        body: formData,
+      })
+      const data = await response.json()
+
+      if (!response.ok) {
+        throw new Error(data.error || '외상 이미지 분석 요청 실패')
+      }
+
+      setWoundAnalysis(data)
+      setWoundAnalysisStatus('done')
+
+      if (data.is_unknown) {
+        setChat(prev => [
+          ...prev,
+          {
+            role: 'ai',
+            text: `분석 결과: 확인불가 이미지입니다. ${data.warning_message || '상처 부위를 더 선명하게 재촬영하십시오.'}`,
+          },
+        ])
+        return
+      }
+
+      setActiveEmergencyGuide('TRAUMA')
+      setActiveTab('GUIDE')
+      setActiveStep(1)
+      setChat(prev => [
+        ...prev,
+        {
+          role: 'ai',
+          text: `분석 완료: ${data.display_name} 감지. 신뢰도 ${data.confidence_percent.toFixed(2)}%, 위험도 ${data.risk}. ${data.action}`,
+        },
+      ])
+    } catch (error) {
+      setWoundAnalysisStatus('error')
+      setWoundAnalysisError(error.message)
+      setChat(prev => [...prev, { role: 'ai', text: `외상 이미지 분석 실패: ${error.message}` }])
+    }
+  }
+
+  const handleWoundImageAnalysis = async (event) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    if (showWoundCamera) closeWoundCamera()
+    await analyzeWoundImageFile(file)
+  }
+
+  const openWoundCamera = () => {
+    setWoundCameraError('')
+    setShowWoundCamera(true)
+  }
+
+  const closeWoundCamera = () => {
+    stopWoundCamera()
+    setShowWoundCamera(false)
+  }
+
+  const captureWoundImage = () => {
+    const video = woundCameraVideoRef.current
+    const canvas = woundCameraCanvasRef.current
+
+    if (!video || !canvas || !woundCameraReady) {
+      setWoundCameraError('카메라 화면이 준비되지 않았습니다.')
+      return
+    }
+
+    const width = video.videoWidth
+    const height = video.videoHeight
+    if (!width || !height) {
+      setWoundCameraError('카메라 해상도를 확인할 수 없습니다.')
+      return
+    }
+
+    canvas.width = width
+    canvas.height = height
+    const context = canvas.getContext('2d')
+    context.drawImage(video, 0, 0, width, height)
+
+    canvas.toBlob(async (blob) => {
+      if (!blob) {
+        setWoundCameraError('촬영 이미지를 생성하지 못했습니다.')
+        return
+      }
+
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
+      const file = new File([blob], `camera-wound-${timestamp}.jpg`, { type: 'image/jpeg' })
+      closeWoundCamera()
+      await analyzeWoundImageFile(file)
+    }, 'image/jpeg', 0.92)
+  }
 
   // --- Views ---
   
@@ -475,28 +659,55 @@ export default function Main() {
                 </div>
               </div>
               <div style={{ padding: '27px 27px 60px 27px', borderTop: '1px solid rgba(255,255,255,0.05)', display: 'flex', flexDirection: 'column', gap: 18, background: '#0a0f1d' }}>
+                <input
+                  ref={woundImageInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={handleWoundImageAnalysis}
+                  style={{ display: 'none' }}
+                />
                 <button 
-                  onClick={() => {
-                    setView('dashboard')
-                    setActiveTab('DASHBOARD')
-                    setChat(prev => [...prev, { role: 'ai', text: '외상 이미지 분석을 시작합니다... [MobileNet V3 활성]' }])
-                    setTimeout(() => {
-                      setChat(prev => [...prev, { role: 'ai', text: '분석 완료 : 중증 열상(Laceration)이 감지되었습니다. 즉시 지혈 처치 가이드를 확인하십시오.' }])
-                      setActiveEmergencyGuide('TRAUMA')
-                      setActiveTab('GUIDE')
-                    }, 2000)
-                  }}
+                  onClick={openWoundCamera}
+                  disabled={woundAnalysisStatus === 'loading'}
                   style={{ 
                     padding: '28px', borderRadius: 24, 
-                    background: '#38bdf8', color: '#000',
+                    background: woundAnalysisStatus === 'loading' ? '#64748b' : '#38bdf8', color: '#000',
                     border: 'none',
-                    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, cursor: 'pointer',
+                    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, cursor: woundAnalysisStatus === 'loading' ? 'not-allowed' : 'pointer',
                     transition: '0.2s'
                   }}
                 >
                   <Camera size={48} strokeWidth={1.5} />
-                  <span style={{ fontSize: 22, fontWeight: 900 }}>외상 촬영 & AI 분석</span>
+                  <span style={{ fontSize: 22, fontWeight: 900 }}>{woundAnalysisStatus === 'loading' ? 'AI 분석 중...' : '외상 촬영 & AI 분석'}</span>
                 </button>
+                {(woundAnalysis || woundAnalysisError || woundAnalysisStatus === 'loading') && (
+                  <div style={{ padding: 18, borderRadius: 18, background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.06)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+                      <Shield size={20} color={woundAnalysis?.is_unknown ? '#fbbf24' : '#2dd4bf'} />
+                      <div style={{ fontSize: 15, fontWeight: 900, color: '#e2e8f0' }}>외상 AI 분석 결과</div>
+                    </div>
+                    {woundImageName && <div style={{ fontSize: 12, color: '#64748b', marginBottom: 10, wordBreak: 'break-all' }}>{woundImageName}</div>}
+                    {woundAnalysisStatus === 'loading' && <div style={{ fontSize: 14, color: '#94a3b8', lineHeight: 1.6 }}>MobileNetV3 Large 모델로 분석 중입니다.</div>}
+                    {woundAnalysisError && <div style={{ fontSize: 14, color: '#fb7185', lineHeight: 1.6 }}>{woundAnalysisError}</div>}
+                    {woundAnalysis && (
+                      <div style={{ display: 'grid', gap: 10 }}>
+                        <div style={{ fontSize: 22, fontWeight: 950, color: woundAnalysis.is_unknown ? '#fbbf24' : '#38bdf8' }}>{woundAnalysis.display_name}</div>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                          <div style={{ padding: 10, borderRadius: 12, background: 'rgba(255,255,255,0.03)' }}>
+                            <div style={{ fontSize: 11, color: '#64748b', marginBottom: 4 }}>신뢰도</div>
+                            <div style={{ fontSize: 16, fontWeight: 900 }}>{woundAnalysis.confidence_percent.toFixed(2)}%</div>
+                          </div>
+                          <div style={{ padding: 10, borderRadius: 12, background: 'rgba(255,255,255,0.03)' }}>
+                            <div style={{ fontSize: 11, color: '#64748b', marginBottom: 4 }}>위험도</div>
+                            <div style={{ fontSize: 16, fontWeight: 900, color: woundAnalysis.risk === 'CRITICAL' ? '#fb7185' : '#2dd4bf' }}>{woundAnalysis.risk}</div>
+                          </div>
+                        </div>
+                        <div style={{ fontSize: 14, color: '#94a3b8', lineHeight: 1.6 }}>{woundAnalysis.action}</div>
+                        {woundAnalysis.warning_message && <div style={{ fontSize: 13, color: '#fbbf24', lineHeight: 1.6 }}>{woundAnalysis.warning_message}</div>}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </aside>
           </div>
@@ -598,6 +809,62 @@ export default function Main() {
                     ))}
                   </tbody>
                 </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {showWoundCamera && (
+          <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.88)', backdropFilter: 'blur(8px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100, padding: 24 }}>
+            <div style={{ width: 'min(920px, 100%)', background: '#0f172a', borderRadius: 28, border: '1px solid rgba(255,255,255,0.1)', overflow: 'hidden', boxShadow: '0 24px 80px rgba(0,0,0,0.55)' }}>
+              <div style={{ padding: 24, borderBottom: '1px solid rgba(255,255,255,0.06)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
+                <div>
+                  <div style={{ fontSize: 22, fontWeight: 950, display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <Camera size={26} color="#38bdf8" /> 외상 카메라 촬영
+                  </div>
+                  <div style={{ fontSize: 14, color: '#64748b', marginTop: 6 }}>상처 또는 스티커 부위를 화면 중앙에 맞춘 뒤 촬영하십시오.</div>
+                </div>
+                <button onClick={closeWoundCamera} style={{ background: 'rgba(255,255,255,0.04)', color: '#94a3b8', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 12, padding: '10px 16px', cursor: 'pointer', fontWeight: 800 }}>
+                  닫기
+                </button>
+              </div>
+              <div style={{ padding: 24, display: 'grid', gap: 18 }}>
+                <div style={{ position: 'relative', minHeight: 420, borderRadius: 22, overflow: 'hidden', background: '#020617', border: '1px solid rgba(255,255,255,0.08)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <video
+                    ref={woundCameraVideoRef}
+                    autoPlay
+                    muted
+                    playsInline
+                    style={{ width: '100%', height: '100%', maxHeight: '62vh', objectFit: 'contain', display: woundCameraError ? 'none' : 'block' }}
+                  />
+                  <canvas ref={woundCameraCanvasRef} style={{ display: 'none' }} />
+                  {!woundCameraError && (
+                    <div style={{ position: 'absolute', inset: '12%', border: '2px solid rgba(56,189,248,0.65)', borderRadius: 22, pointerEvents: 'none', boxShadow: '0 0 0 999px rgba(0,0,0,0.18)' }} />
+                  )}
+                  {woundCameraError && (
+                    <div style={{ padding: 28, textAlign: 'center', color: '#fb7185', lineHeight: 1.7, fontSize: 16 }}>
+                      {woundCameraError}
+                    </div>
+                  )}
+                  {!woundCameraReady && !woundCameraError && (
+                    <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(2,6,23,0.72)', color: '#94a3b8', fontWeight: 800 }}>
+                      카메라 준비 중
+                    </div>
+                  )}
+                </div>
+                <div style={{ display: 'flex', gap: 14, justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap' }}>
+                  <div style={{ fontSize: 14, color: '#94a3b8', lineHeight: 1.6 }}>
+                    무광 스티커를 피부에 밀착시키고 빛 반사를 줄이면 인식률이 높아집니다.
+                  </div>
+                  <div style={{ display: 'flex', gap: 12 }}>
+                    <button onClick={() => woundImageInputRef.current?.click()} style={{ padding: '14px 20px', borderRadius: 14, background: 'rgba(255,255,255,0.05)', color: '#e2e8f0', border: '1px solid rgba(255,255,255,0.08)', fontWeight: 900, cursor: 'pointer' }}>
+                      파일 선택
+                    </button>
+                    <button onClick={captureWoundImage} disabled={!woundCameraReady || woundAnalysisStatus === 'loading'} style={{ padding: '14px 24px', borderRadius: 14, background: (!woundCameraReady || woundAnalysisStatus === 'loading') ? '#64748b' : '#38bdf8', color: '#000', border: 'none', fontWeight: 950, cursor: (!woundCameraReady || woundAnalysisStatus === 'loading') ? 'not-allowed' : 'pointer' }}>
+                      촬영 후 분석
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
